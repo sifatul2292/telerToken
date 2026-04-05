@@ -1,0 +1,3 @@
+module.exports=[88278,(a,b,c)=>{let{createClientModuleProxy:d}=a.r(65551);a.n(d("[project]/fuel-token-bd/node_modules/next/dist/client/components/builtin/global-error.js <module evaluation>"))},85542,(a,b,c)=>{let{createClientModuleProxy:d}=a.r(65551);a.n(d("[project]/fuel-token-bd/node_modules/next/dist/client/components/builtin/global-error.js"))},88028,a=>{"use strict";a.i(88278);var b=a.i(85542);a.n(b)},83112,a=>{a.n(a.i(88028))}];
+
+//# sourceMappingURL=11id_next_dist_client_components_builtin_global-error_0pa279g.js.map
