@@ -1,5 +1,6 @@
 "use client";
 
+import BookingModal from "@/components/BookingModal";
 import { supabase } from "@/lib/supabase";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -117,6 +118,7 @@ export default function FuelStationMap() {
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [slotsError, setSlotsError] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [bookingOpen, setBookingOpen] = useState(false);
 
   const today = useMemo(() => todayDhakaYmd(), []);
 
@@ -182,6 +184,16 @@ export default function FuelStationMap() {
   const closeSheet = useCallback(() => {
     setSheetOpen(false);
     setSelectedSlotId(null);
+    setBookingOpen(false);
+  }, []);
+
+  const bookingSlot = useMemo(() => {
+    if (!selectedSlotId) return null;
+    return availableSlots.find((s) => s.id === selectedSlotId) ?? null;
+  }, [availableSlots, selectedSlotId]);
+
+  const closeBooking = useCallback(() => {
+    setBookingOpen(false);
   }, []);
 
   return (
@@ -325,7 +337,10 @@ export default function FuelStationMap() {
                           <button
                             key={slot.id}
                             type="button"
-                            onClick={() => setSelectedSlotId(slot.id)}
+                            onClick={() => {
+                              setSelectedSlotId(slot.id);
+                              setBookingOpen(true);
+                            }}
                             className={`min-h-11 rounded-full border px-4 py-2 text-sm font-medium transition active:scale-[0.98] ${
                               active
                                 ? "border-emerald-600 bg-emerald-50 text-emerald-900 ring-2 ring-emerald-600/30"
@@ -340,28 +355,23 @@ export default function FuelStationMap() {
                   )}
                 </div>
 
-                {selectedSlotId && (
-                  <button
-                    type="button"
-                    className="mt-5 flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99]"
-                    onClick={() => {
-                      const slot = availableSlots.find(
-                        (s) => s.id === selectedSlotId,
-                      );
-                      if (!slot || !selected) return;
-                      window.alert(
-                        `Book ${formatSlotRange(slot.start_time, slot.end_time)} at ${selected.name}? (Wire this to your booking API.)`,
-                      );
-                    }}
-                  >
-                    Book this slot
-                  </button>
-                )}
               </div>
             </div>
           </div>
         </>
       )}
+
+      <BookingModal
+        key={
+          bookingOpen && bookingSlot && selected
+            ? `${selected.id}-${bookingSlot.id}`
+            : "booking-idle"
+        }
+        open={bookingOpen && !!selected && !!bookingSlot}
+        station={selected}
+        slot={bookingSlot}
+        onClose={closeBooking}
+      />
 
     </div>
   );
