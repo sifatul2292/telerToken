@@ -1,7 +1,6 @@
 "use client";
 
 import { supabase } from "@/lib/supabase";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 export type BookingStation = {
@@ -20,6 +19,13 @@ export type BookingSlot = {
 
 const BD_PHONE_RE = /^01[3-9]\d{8}$/;
 
+const PAYMENT_BKASH =
+  process.env.NEXT_PUBLIC_PAYMENT_BKASH_NUMBER ?? "01XXXXXXXXX";
+const PAYMENT_NAGAD =
+  process.env.NEXT_PUBLIC_PAYMENT_NAGAD_NUMBER ?? "01XXXXXXXXX";
+const PAYMENT_ROCKET =
+  process.env.NEXT_PUBLIC_PAYMENT_ROCKET_NUMBER ?? "01XXXXXXXXX";
+
 function fuelTypeOptions(raw: BookingStation["fuel_types"]): string[] {
   if (raw == null) return [];
   if (Array.isArray(raw)) return raw.map((s) => String(s).trim()).filter(Boolean);
@@ -35,6 +41,15 @@ function formatSlotRange(start: string, end: string): string {
 
 function randomOtp(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function generateTokenCode(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i = 0; i < 6; i++) {
+    s += chars[Math.floor(Math.random() * chars.length)]!;
+  }
+  return s;
 }
 
 type ToastProps = {
@@ -65,13 +80,14 @@ type BookingModalProps = {
   onClose: () => void;
 };
 
+type Step = "details" | "otp" | "payment" | "success";
+
 export default function BookingModal({
   open,
   station,
   slot,
   onClose,
 }: BookingModalProps) {
-  const router = useRouter();
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
   const [license, setLicense] = useState("");
@@ -81,11 +97,18 @@ export default function BookingModal({
   });
   const [otpSecret, setOtpSecret] = useState<string | null>(null);
   const [otpInput, setOtpInput] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
+  const [step, setStep] = useState<Step>("details");
   const [toast, setToast] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [bookingError, setBookingError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [pendingTokenId, setPendingTokenId] = useState<string | null>(null);
+
+  const [payMethod, setPayMethod] = useState<"bkash" | "nagad" | "rocket">(
+    "bkash",
+  );
+  const [payFromNumber, setPayFromNumber] = useState("");
+  const [trxId, setTrxId] = useState("");
 
   const options = station ? fuelTypeOptions(station.fuel_types) : [];
 
@@ -102,7 +125,9 @@ export default function BookingModal({
       return;
     }
     if (!BD_PHONE_RE.test(ph)) {
-      setFormError("Enter a valid Bangladesh mobile number (11 digits, starts with 01).");
+      setFormError(
+        "Enter a valid Bangladesh mobile number (11 digits, starts with 01).",
+      );
       return;
     }
     if (lic.length < 4) {
@@ -119,12 +144,12 @@ export default function BookingModal({
     }
     const code = randomOtp();
     setOtpSecret(code);
-    setOtpSent(true);
     setOtpInput("");
+    setStep("otp");
     setToast(`Demo OTP: ${code}`);
   };
 
-  const handleVerifyAndBook = async () => {
+  const createReservationAfterOtp = async () => {
     if (!station || !slot || !otpSecret) return;
     setBookingError(null);
     if (otpInput.trim() !== otpSecret) {
@@ -159,9 +184,25 @@ export default function BookingModal({
         return;
       }
 
-      const lockUntil = new Date(
-        Date.now() + 3 * 24 * 60 * 60 * 1000,
-      ).toISOString();
+      const { data: existingCitizen } = await supabase
+        .from("citizens")
+        .select("id")
+        .eq("phone", ph)
+        .maybeSingle();
+
+      if (existingCitizen) {
+        const { count } = await supabase
+          .from("tokens")
+          .select("*", { count: "exact", head: true })
+          .eq("citizen_id", existingCitizen.id)
+          .in("status", ["pending_payment", "pending_approval", "active"]);
+
+        if (count && count > 0) {
+          setBookingError("You already have an active token");
+          setSubmitting(false);
+          return;
+        }
+      }
 
       const { data: citizenRow, error: citizenErr } = await supabase
         .from("citizens")
@@ -170,7 +211,7 @@ export default function BookingModal({
             full_name: name,
             phone: ph,
             driving_license_number: lic,
-            locked_until: lockUntil,
+            locked_until: null,
             updated_at: nowIso,
           },
           { onConflict: "phone" },
@@ -184,19 +225,53 @@ export default function BookingModal({
         return;
       }
 
-      const { data: tokenRow, error: tokenErr } = await supabase
+      const { count: openCount } = await supabase
         .from("tokens")
-        .insert({
-          citizen_id: citizenRow.id,
-          station_id: station.id,
-          time_slot_id: slot.id,
-          fuel_type: fuelType,
-        })
-        .select("id")
-        .single();
+        .select("*", { count: "exact", head: true })
+        .eq("citizen_id", citizenRow.id)
+        .in("status", ["pending_payment", "pending_approval", "active"]);
 
-      if (tokenErr || !tokenRow) {
+      if (openCount && openCount > 0) {
+        setBookingError("You already have an active token");
+        setSubmitting(false);
+        return;
+      }
+
+      let tokenCode = generateTokenCode();
+      let tokenRow: { id: string } | null = null;
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { data, error: tokenErr } = await supabase
+          .from("tokens")
+          .insert({
+            citizen_id: citizenRow.id,
+            station_id: station.id,
+            time_slot_id: slot.id,
+            fuel_type: fuelType,
+            token_code: tokenCode,
+            status: "pending_payment",
+          })
+          .select("id")
+          .single();
+
+        if (!tokenErr && data) {
+          tokenRow = data;
+          break;
+        }
+        if (
+          tokenErr?.message?.includes("duplicate") ||
+          tokenErr?.code === "23505"
+        ) {
+          tokenCode = generateTokenCode();
+          continue;
+        }
         setBookingError(tokenErr?.message ?? "Could not create your token.");
+        setSubmitting(false);
+        return;
+      }
+
+      if (!tokenRow) {
+        setBookingError("Could not create your token.");
         setSubmitting(false);
         return;
       }
@@ -230,10 +305,54 @@ export default function BookingModal({
         return;
       }
 
-      onClose();
-      router.push(`/token/${tokenRow.id}`);
+      setPendingTokenId(tokenRow.id);
+      setPayFromNumber(ph);
+      setStep("payment");
     } catch (e) {
       setBookingError(e instanceof Error ? e.message : "Something went wrong.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSubmitPayment = async () => {
+    if (!pendingTokenId) return;
+    setBookingError(null);
+    const from = payFromNumber.replace(/\s/g, "");
+    const tid = trxId.trim();
+    if (!BD_PHONE_RE.test(from)) {
+      setBookingError("Enter the mobile number you paid from (11 digits).");
+      return;
+    }
+    if (tid.length < 4) {
+      setBookingError("Enter the transaction ID from your SMS.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/submit-payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tokenId: pendingTokenId,
+          paymentMethod: payMethod,
+          paymentNumber: from,
+          transactionId: tid,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBookingError(
+          typeof data.error === "string" ? data.error : "Payment submit failed.",
+        );
+        setSubmitting(false);
+        return;
+      }
+      setStep("success");
+    } catch (e) {
+      setBookingError(e instanceof Error ? e.message : "Something went wrong.");
+    } finally {
       setSubmitting(false);
     }
   };
@@ -265,7 +384,7 @@ export default function BookingModal({
                   id="booking-title"
                   className="text-lg font-semibold text-zinc-900"
                 >
-                  Book slot
+                  {step === "success" ? "All set" : "Book slot"}
                 </h2>
                 <p className="mt-1 text-sm text-zinc-600">
                   {station.name} · {slot.slot_date} ·{" "}
@@ -294,120 +413,239 @@ export default function BookingModal({
               </button>
             </div>
 
-            <div className="mt-5 space-y-4">
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Full name
-                </span>
-                <input
-                  type="text"
-                  autoComplete="name"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
-                  placeholder="As on your license"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Phone number
-                </span>
-                <input
-                  type="tel"
-                  inputMode="numeric"
-                  autoComplete="tel"
-                  value={phone}
-                  onChange={(e) =>
-                    setPhone(e.target.value.replace(/[^\d]/g, "").slice(0, 11))
-                  }
-                  className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
-                  placeholder="01XXXXXXXXX"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Driving license number
-                </span>
-                <input
-                  type="text"
-                  value={license}
-                  onChange={(e) => setLicense(e.target.value)}
-                  className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
-                  placeholder="License number"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Fuel type
-                </span>
-                <select
-                  value={fuelType}
-                  onChange={(e) => setFuelType(e.target.value)}
-                  disabled={!options.length}
-                  className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-60"
-                >
-                  <option value="">
-                    {options.length ? "Select fuel type" : "No types listed"}
-                  </option>
-                  {options.map((ft) => (
-                    <option key={ft} value={ft}>
-                      {ft}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {formError && (
-                <p className="text-sm text-red-600" role="alert">
-                  {formError}
+            {step === "success" ? (
+              <div className="mt-8 rounded-2xl border border-emerald-200 bg-emerald-50/80 px-4 py-5 text-center">
+                <p className="text-base font-medium text-emerald-950">
+                  Payment submitted! We will review and send you an SMS
+                  confirmation within 30 minutes.
                 </p>
-              )}
-              {bookingError && (
-                <p className="text-sm text-red-600" role="alert">
-                  {bookingError}
-                </p>
-              )}
-
-              {!otpSent ? (
                 <button
                   type="button"
-                  onClick={handleSendOtp}
-                  className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99]"
+                  onClick={onClose}
+                  className="mt-5 w-full rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white hover:bg-emerald-700"
                 >
-                  Send OTP
+                  Close
                 </button>
-              ) : (
-                <div className="space-y-3">
-                  <label className="block">
-                    <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                      Enter OTP
-                    </span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={otpInput}
-                      onChange={(e) =>
-                        setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))
-                      }
-                      className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-center text-lg tracking-[0.3em] text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
-                      placeholder="000000"
-                      maxLength={6}
-                    />
-                  </label>
+              </div>
+            ) : step === "payment" ? (
+              <div className="mt-5 space-y-4">
+                <p className="text-center text-base font-medium text-zinc-900">
+                  To confirm your slot, send ৳20 to any of these numbers:
+                </p>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-center shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                      bKash
+                    </p>
+                    <p className="mt-1 font-mono text-sm font-medium text-zinc-900">
+                      {PAYMENT_BKASH}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-center shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                      Nagad
+                    </p>
+                    <p className="mt-1 font-mono text-sm font-medium text-zinc-900">
+                      {PAYMENT_NAGAD}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-center shadow-sm sm:col-span-1">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                      Rocket
+                    </p>
+                    <p className="mt-1 font-mono text-sm font-medium text-zinc-900">
+                      {PAYMENT_ROCKET}
+                    </p>
+                  </div>
+                </div>
+                <p className="text-sm text-zinc-600">
+                  After sending, enter your transaction details below
+                </p>
+
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Paid with
+                  </span>
+                  <select
+                    value={payMethod}
+                    onChange={(e) =>
+                      setPayMethod(e.target.value as typeof payMethod)
+                    }
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
+                  >
+                    <option value="bkash">bKash</option>
+                    <option value="nagad">Nagad</option>
+                    <option value="rocket">Rocket</option>
+                  </select>
+                </label>
+
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Your mobile number you sent from
+                  </span>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    value={payFromNumber}
+                    onChange={(e) =>
+                      setPayFromNumber(
+                        e.target.value.replace(/\D/g, "").slice(0, 11),
+                      )
+                    }
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
+                    placeholder="01XXXXXXXXX"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Transaction ID
+                  </span>
+                  <input
+                    type="text"
+                    value={trxId}
+                    onChange={(e) => setTrxId(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
+                    placeholder="TrxID from payment SMS"
+                  />
+                </label>
+
+                {bookingError && (
+                  <p className="text-sm text-red-600" role="alert">
+                    {bookingError}
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={handleSubmitPayment}
+                  className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-60"
+                >
+                  {submitting ? "Submitting…" : "Submit payment"}
+                </button>
+              </div>
+            ) : (
+              <div className="mt-5 space-y-4">
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Full name
+                  </span>
+                  <input
+                    type="text"
+                    autoComplete="name"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    disabled={step === "otp"}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-70"
+                    placeholder="As on your license"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Phone number
+                  </span>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel"
+                    value={phone}
+                    onChange={(e) =>
+                      setPhone(e.target.value.replace(/\D/g, "").slice(0, 11))
+                    }
+                    disabled={step === "otp"}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-70"
+                    placeholder="01XXXXXXXXX"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Driving license number
+                  </span>
+                  <input
+                    type="text"
+                    value={license}
+                    onChange={(e) => setLicense(e.target.value)}
+                    disabled={step === "otp"}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-70"
+                    placeholder="License number"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Fuel type
+                  </span>
+                  <select
+                    value={fuelType}
+                    onChange={(e) => setFuelType(e.target.value)}
+                    disabled={!options.length || step === "otp"}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-60"
+                  >
+                    <option value="">
+                      {options.length ? "Select fuel type" : "No types listed"}
+                    </option>
+                    {options.map((ft) => (
+                      <option key={ft} value={ft}>
+                        {ft}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {formError && (
+                  <p className="text-sm text-red-600" role="alert">
+                    {formError}
+                  </p>
+                )}
+                {bookingError && (
+                  <p className="text-sm text-red-600" role="alert">
+                    {bookingError}
+                  </p>
+                )}
+
+                {step === "details" ? (
                   <button
                     type="button"
-                    disabled={submitting}
-                    onClick={handleVerifyAndBook}
-                    className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-60"
+                    onClick={handleSendOtp}
+                    className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99]"
                   >
-                    {submitting ? "Booking…" : "Verify OTP"}
+                    Send OTP
                   </button>
-                </div>
-              )}
-            </div>
+                ) : (
+                  <div className="space-y-3">
+                    <label className="block">
+                      <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                        Enter OTP
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={otpInput}
+                        onChange={(e) =>
+                          setOtpInput(
+                            e.target.value.replace(/\D/g, "").slice(0, 6),
+                          )
+                        }
+                        className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-center text-lg tracking-[0.3em] text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
+                        placeholder="000000"
+                        maxLength={6}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={createReservationAfterOtp}
+                      className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-60"
+                    >
+                      {submitting ? "Verifying…" : "Verify OTP"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
