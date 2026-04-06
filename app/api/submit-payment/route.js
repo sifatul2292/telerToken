@@ -7,14 +7,13 @@ const supabase = createClient(
 )
 
 export async function POST(request) {
-  const { 
-    tokenId, 
-    paymentMethod,    // 'bkash' | 'nagad' | 'rocket'
-    paymentNumber,    // their bkash/nagad number they sent from
-    transactionId     // the TrxID from their payment confirmation SMS
+  const {
+    tokenId,
+    paymentMethod,
+    paymentNumber,
+    transactionId
   } = await request.json()
 
-  // Save payment details, mark as pending approval
   const { error } = await supabase
     .from('tokens')
     .update({
@@ -30,8 +29,5 @@ export async function POST(request) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  return NextResponse.json({ 
-    success: true, 
-    message: 'Payment submitted. You will receive an SMS once approved.' 
-  })
+  return NextResponse.json({ success: true })
 }
