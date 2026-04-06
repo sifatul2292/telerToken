@@ -51,6 +51,13 @@ function generateTokenCode(): string {
 const DUPLICATE_MSG =
   "You already have an active or pending token. Please wait for approval or come back after your lock period ends.";
 
+const VEHICLE_FEES = {
+  motorcycle: 50,
+  car_cng: 100,
+} as const;
+
+type VehicleType = keyof typeof VEHICLE_FEES;
+
 type BookingModalProps = {
   open: boolean;
   station: BookingStation | null;
@@ -73,6 +80,7 @@ export default function BookingModal({
     const opts = station ? fuelTypeOptions(station.fuel_types) : [];
     return opts.length === 1 ? opts[0]! : "";
   });
+  const [vehicleType, setVehicleType] = useState<VehicleType>("motorcycle");
   const [step, setStep] = useState<Step>("form");
   const [formError, setFormError] = useState<string | null>(null);
   const [bookingError, setBookingError] = useState<string | null>(null);
@@ -86,6 +94,7 @@ export default function BookingModal({
   const [trxId, setTrxId] = useState("");
 
   const options = station ? fuelTypeOptions(station.fuel_types) : [];
+  const feeAmount = VEHICLE_FEES[vehicleType];
 
   async function citizenIdsMatchingPhoneOrLicense(
     ph: string,
@@ -149,6 +158,7 @@ export default function BookingModal({
     }
 
     setSubmitting(true);
+    const bookingFee = VEHICLE_FEES[vehicleType];
     const nowIso = new Date().toISOString();
 
     try {
@@ -200,6 +210,8 @@ export default function BookingModal({
             fuel_type: fuelType,
             token_code: tokenCode,
             status: "pending_payment",
+            vehicle_type: vehicleType,
+            amount: bookingFee,
           })
           .select("id")
           .single();
@@ -379,8 +391,13 @@ export default function BookingModal({
               </div>
             ) : step === "payment" ? (
               <div className="mt-5 space-y-4">
+                <p className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center text-sm font-semibold text-emerald-950">
+                  Send exactly ৳{feeAmount} — then enter your transaction ID
+                  below.
+                </p>
                 <p className="text-center text-base font-medium text-zinc-900">
-                  To confirm your slot, send ৳20 to any of these numbers:
+                  Use bKash, Nagad, or Rocket to send ৳{feeAmount} to any of
+                  these numbers:
                 </p>
                 <div className="grid gap-3 sm:grid-cols-3">
                   <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-center shadow-sm">
@@ -409,7 +426,8 @@ export default function BookingModal({
                   </div>
                 </div>
                 <p className="text-sm text-zinc-600">
-                  After sending, enter your transaction details below
+                  After sending exactly ৳{feeAmount}, enter your payment details
+                  below.
                 </p>
 
                 <label className="block">
@@ -520,6 +538,42 @@ export default function BookingModal({
                     placeholder="License number"
                   />
                 </label>
+
+                <fieldset className="space-y-2">
+                  <legend className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Vehicle type
+                  </legend>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={() => setVehicleType("motorcycle")}
+                      className={`rounded-xl border-2 px-4 py-3 text-left transition ${
+                        vehicleType === "motorcycle"
+                          ? "border-emerald-600 bg-emerald-50 ring-2 ring-emerald-200"
+                          : "border-zinc-200 bg-zinc-50 hover:border-zinc-300"
+                      }`}
+                    >
+                      <span className="block font-semibold text-zinc-900">
+                        Motorcycle
+                      </span>
+                      <span className="text-sm text-emerald-700">৳50</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVehicleType("car_cng")}
+                      className={`rounded-xl border-2 px-4 py-3 text-left transition ${
+                        vehicleType === "car_cng"
+                          ? "border-emerald-600 bg-emerald-50 ring-2 ring-emerald-200"
+                          : "border-zinc-200 bg-zinc-50 hover:border-zinc-300"
+                      }`}
+                    >
+                      <span className="block font-semibold text-zinc-900">
+                        Car / CNG
+                      </span>
+                      <span className="text-sm text-emerald-700">৳100</span>
+                    </button>
+                  </div>
+                </fieldset>
 
                 <label className="block">
                   <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">

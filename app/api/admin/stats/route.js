@@ -6,41 +6,16 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )
 
-export async function POST(request) {
-  const { adminPassword } = await request.json()
-
-  if (adminPassword !== process.env.ADMIN_PASSWORD) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
+export async function GET() {
   const today = new Date().toISOString().split('T')[0]
 
-  const { data: tokens } = await supabase
+  const { count } = await supabase
     .from('tokens')
-    .select('status, created_at')
+    .select('*', { count: 'exact', head: true })
+    .gte('created_at', today)
 
-  const pendingTotal = tokens?.filter(t =>
-    t.status === 'pending_approval' || t.status === 'pending_payment'
-  ).length ?? 0
-
-  const activeToday = tokens?.filter(t =>
-    t.status === 'active' &&
-    t.created_at?.startsWith(today)
-  ).length ?? 0
-
-  const usedToday = tokens?.filter(t =>
-    t.status === 'used' &&
-    t.created_at?.startsWith(today)
-  ).length ?? 0
-
-  const rejectedTotal = tokens?.filter(t =>
-    t.status === 'rejected'
-  ).length ?? 0
-
-  return NextResponse.json({
-    pendingTotal,
-    activeToday,
-    usedToday,
-    rejectedTotal
+  return NextResponse.json({ 
+    registeredToday: count || 0,
+    message: count > 0 ? `${count} people registered today` : 'Be the first to register today'
   })
 }

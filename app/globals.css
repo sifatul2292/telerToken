@@ -26,7 +26,8 @@ body {
 }
 
 /* Leaflet map (FuelStationMap) */
-.fuel-map-pin {
+.fuel-map-pin,
+.fuel-map-pin-wrap {
   background: transparent !important;
   border: none !important;
 }
