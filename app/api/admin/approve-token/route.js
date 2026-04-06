@@ -52,11 +52,14 @@ export async function POST(request) {
     })
     .eq('id', tokenId)
 
-  // Set citizen lock — 3 days from now
-  await supabase
-    .from('citizens')
-    .update({ locked_until: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString() })
-    .eq('id', token.citizen_id)
+// Set 3-day lock ONLY when admin approves
+await supabase
+  .from('citizens')
+  .update({ 
+    locked_until: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+    updated_at: new Date().toISOString()
+  })
+  .eq('id', token.citizen_id)
 
   // Format slot date nicely
   const slotDate = new Date(token.time_slots.slot_date)

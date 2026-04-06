@@ -1,7 +1,7 @@
 "use client";
 
 import { supabase } from "@/lib/supabase";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 
 export type BookingStation = {
   id: string;
@@ -39,10 +39,6 @@ function formatSlotRange(start: string, end: string): string {
   return `${start.slice(0, 5)} – ${end.slice(0, 5)}`;
 }
 
-function randomOtp(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
 function generateTokenCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let s = "";
@@ -52,26 +48,8 @@ function generateTokenCode(): string {
   return s;
 }
 
-type ToastProps = {
-  message: string;
-  onDismiss: () => void;
-};
-
-function Toast({ message, onDismiss }: ToastProps) {
-  useEffect(() => {
-    const t = setTimeout(onDismiss, 4500);
-    return () => clearTimeout(t);
-  }, [onDismiss]);
-
-  return (
-    <div
-      role="status"
-      className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-[1200] w-[min(92vw,24rem)] -translate-x-1/2 rounded-2xl border border-zinc-200 bg-zinc-900 px-4 py-3 text-center text-sm font-medium text-white shadow-xl"
-    >
-      {message}
-    </div>
-  );
-}
+const DUPLICATE_MSG =
+  "You already have an active or pending token. Please wait for approval or come back after your lock period ends.";
 
 type BookingModalProps = {
   open: boolean;
@@ -80,7 +58,7 @@ type BookingModalProps = {
   onClose: () => void;
 };
 
-type Step = "details" | "otp" | "payment" | "success";
+type Step = "form" | "payment" | "success";
 
 export default function BookingModal({
   open,
@@ -95,10 +73,7 @@ export default function BookingModal({
     const opts = station ? fuelTypeOptions(station.fuel_types) : [];
     return opts.length === 1 ? opts[0]! : "";
   });
-  const [otpSecret, setOtpSecret] = useState<string | null>(null);
-  const [otpInput, setOtpInput] = useState("");
-  const [step, setStep] = useState<Step>("details");
-  const [toast, setToast] = useState<string | null>(null);
+  const [step, setStep] = useState<Step>("form");
   const [formError, setFormError] = useState<string | null>(null);
   const [bookingError, setBookingError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -112,14 +87,44 @@ export default function BookingModal({
 
   const options = station ? fuelTypeOptions(station.fuel_types) : [];
 
-  const dismissToast = useCallback(() => setToast(null), []);
+  async function citizenIdsMatchingPhoneOrLicense(
+    ph: string,
+    lic: string,
+  ): Promise<string[]> {
+    const { data: byPhone } = await supabase
+      .from("citizens")
+      .select("id")
+      .eq("phone", ph);
+    const { data: byLic } = await supabase
+      .from("citizens")
+      .select("id")
+      .eq("driving_license_number", lic);
+    const ids = new Set<string>();
+    for (const r of byPhone ?? []) ids.add(r.id);
+    for (const r of byLic ?? []) ids.add(r.id);
+    return [...ids];
+  }
 
-  const handleSendOtp = () => {
+  async function hasBlockingToken(citizenIds: string[]): Promise<boolean> {
+    if (citizenIds.length === 0) return false;
+    const { count, error } = await supabase
+      .from("tokens")
+      .select("*", { count: "exact", head: true })
+      .in("citizen_id", citizenIds)
+      .in("status", ["pending_payment", "pending_approval", "active"]);
+    if (error) throw new Error(error.message);
+    return (count ?? 0) > 0;
+  }
+
+  const handleSubmitForm = async () => {
+    if (!station || !slot) return;
     setFormError(null);
     setBookingError(null);
+
     const name = fullName.trim();
     const ph = phone.replace(/\s/g, "");
     const lic = license.trim();
+
     if (name.length < 2) {
       setFormError("Please enter your full name.");
       return;
@@ -142,66 +147,16 @@ export default function BookingModal({
       setFormError("Select a fuel type.");
       return;
     }
-    const code = randomOtp();
-    setOtpSecret(code);
-    setOtpInput("");
-    setStep("otp");
-    setToast(`Demo OTP: ${code}`);
-  };
-
-  const createReservationAfterOtp = async () => {
-    if (!station || !slot || !otpSecret) return;
-    setBookingError(null);
-    if (otpInput.trim() !== otpSecret) {
-      setBookingError("Incorrect OTP. Try again.");
-      return;
-    }
 
     setSubmitting(true);
-    const ph = phone.replace(/\s/g, "");
-    const lic = license.trim();
-    const name = fullName.trim();
     const nowIso = new Date().toISOString();
 
     try {
-      const { data: lockPhone } = await supabase
-        .from("citizens")
-        .select("id")
-        .eq("phone", ph)
-        .gt("locked_until", nowIso)
-        .maybeSingle();
-
-      const { data: lockLic } = await supabase
-        .from("citizens")
-        .select("id")
-        .eq("driving_license_number", lic)
-        .gt("locked_until", nowIso)
-        .maybeSingle();
-
-      if (lockPhone || lockLic) {
-        setBookingError("You already have an active token");
+      const ids = await citizenIdsMatchingPhoneOrLicense(ph, lic);
+      if (await hasBlockingToken(ids)) {
+        setBookingError(DUPLICATE_MSG);
         setSubmitting(false);
         return;
-      }
-
-      const { data: existingCitizen } = await supabase
-        .from("citizens")
-        .select("id")
-        .eq("phone", ph)
-        .maybeSingle();
-
-      if (existingCitizen) {
-        const { count } = await supabase
-          .from("tokens")
-          .select("*", { count: "exact", head: true })
-          .eq("citizen_id", existingCitizen.id)
-          .in("status", ["pending_payment", "pending_approval", "active"]);
-
-        if (count && count > 0) {
-          setBookingError("You already have an active token");
-          setSubmitting(false);
-          return;
-        }
       }
 
       const { data: citizenRow, error: citizenErr } = await supabase
@@ -211,6 +166,7 @@ export default function BookingModal({
             full_name: name,
             phone: ph,
             driving_license_number: lic,
+            fuel_type: fuelType,
             locked_until: null,
             updated_at: nowIso,
           },
@@ -225,14 +181,8 @@ export default function BookingModal({
         return;
       }
 
-      const { count: openCount } = await supabase
-        .from("tokens")
-        .select("*", { count: "exact", head: true })
-        .eq("citizen_id", citizenRow.id)
-        .in("status", ["pending_payment", "pending_approval", "active"]);
-
-      if (openCount && openCount > 0) {
-        setBookingError("You already have an active token");
+      if (await hasBlockingToken([citizenRow.id])) {
+        setBookingError(DUPLICATE_MSG);
         setSubmitting(false);
         return;
       }
@@ -416,8 +366,8 @@ export default function BookingModal({
             {step === "success" ? (
               <div className="mt-8 rounded-2xl border border-emerald-200 bg-emerald-50/80 px-4 py-5 text-center">
                 <p className="text-base font-medium text-emerald-950">
-                  Payment submitted! We will review and send you an SMS
-                  confirmation within 30 minutes.
+                  Payment submitted! We will review your transaction and send you
+                  an SMS confirmation within 30 minutes.
                 </p>
                 <button
                   type="button"
@@ -522,7 +472,7 @@ export default function BookingModal({
                   onClick={handleSubmitPayment}
                   className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-60"
                 >
-                  {submitting ? "Submitting…" : "Submit payment"}
+                  {submitting ? "Submitting…" : "Submit Payment"}
                 </button>
               </div>
             ) : (
@@ -536,8 +486,7 @@ export default function BookingModal({
                     autoComplete="name"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
-                    disabled={step === "otp"}
-                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-70"
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
                     placeholder="As on your license"
                   />
                 </label>
@@ -554,8 +503,7 @@ export default function BookingModal({
                     onChange={(e) =>
                       setPhone(e.target.value.replace(/\D/g, "").slice(0, 11))
                     }
-                    disabled={step === "otp"}
-                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-70"
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
                     placeholder="01XXXXXXXXX"
                   />
                 </label>
@@ -568,8 +516,7 @@ export default function BookingModal({
                     type="text"
                     value={license}
                     onChange={(e) => setLicense(e.target.value)}
-                    disabled={step === "otp"}
-                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-70"
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
                     placeholder="License number"
                   />
                 </label>
@@ -581,7 +528,7 @@ export default function BookingModal({
                   <select
                     value={fuelType}
                     onChange={(e) => setFuelType(e.target.value)}
-                    disabled={!options.length || step === "otp"}
+                    disabled={!options.length}
                     className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-base text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15 disabled:opacity-60"
                   >
                     <option value="">
@@ -606,51 +553,19 @@ export default function BookingModal({
                   </p>
                 )}
 
-                {step === "details" ? (
-                  <button
-                    type="button"
-                    onClick={handleSendOtp}
-                    className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99]"
-                  >
-                    Send OTP
-                  </button>
-                ) : (
-                  <div className="space-y-3">
-                    <label className="block">
-                      <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                        Enter OTP
-                      </span>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        value={otpInput}
-                        onChange={(e) =>
-                          setOtpInput(
-                            e.target.value.replace(/\D/g, "").slice(0, 6),
-                          )
-                        }
-                        className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-center text-lg tracking-[0.3em] text-zinc-900 outline-none ring-emerald-600/0 transition focus:border-emerald-500 focus:bg-white focus:ring-4 focus:ring-emerald-600/15"
-                        placeholder="000000"
-                        maxLength={6}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      disabled={submitting}
-                      onClick={createReservationAfterOtp}
-                      className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-60"
-                    >
-                      {submitting ? "Verifying…" : "Verify OTP"}
-                    </button>
-                  </div>
-                )}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={handleSubmitForm}
+                  className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-emerald-600 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-60"
+                >
+                  {submitting ? "Submitting…" : "Submit"}
+                </button>
               </div>
             )}
           </div>
         </div>
       </div>
-
-      {toast && <Toast message={toast} onDismiss={dismissToast} />}
     </>
   );
 }

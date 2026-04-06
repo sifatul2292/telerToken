@@ -1,5 +1,8 @@
 -- Run after booking_schema.sql if these columns are missing.
 
+ALTER TABLE public.citizens
+  ADD COLUMN IF NOT EXISTS fuel_type TEXT;
+
 ALTER TABLE public.tokens
   ADD COLUMN IF NOT EXISTS token_code TEXT,
   ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending_payment',
