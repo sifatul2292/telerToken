@@ -13,20 +13,23 @@ export async function POST(request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { data, error } = await supabase
+  const { data: tokens, error } = await supabase
     .from("tokens")
     .select(
       `
       id,
       token_code,
       status,
+      fuel_type,
       payment_method,
       payment_number,
       transaction_id,
       payment_submitted_at,
+      amount,
+      citizen_id,
       fuel_stations ( name ),
       time_slots ( slot_date, start_time, end_time ),
-      citizens ( full_name, phone )
+      citizens ( full_name, phone, driving_license_number )
     `,
     )
     .eq("status", "pending_approval")
@@ -36,5 +39,5 @@ export async function POST(request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ tokens: data ?? [] });
+  return NextResponse.json({ tokens });
 }
